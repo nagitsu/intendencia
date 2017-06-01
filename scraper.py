@@ -1,7 +1,10 @@
 import click
+import functools
 import json
+import os.path
 import random
 import requests
+import time
 
 from click import echo, progressbar
 from lxml import html, etree
@@ -15,12 +18,22 @@ BASE_URL = 'http://www.montevideo.gub.uy/asl/sistemas/Gestar/resoluci.nsf'
 def fetch_dates():
     url = f'{BASE_URL}/BetaWebFechaApAsc?OpenView&Start=1&Count=30000'
 
-    response = requests.get(url)
+    response = get(url)
     root = html.fromstring(response.content)
 
     dates = root.xpath("//font[@size='2' and @face='Arial']/text()")
 
     return dates
+
+
+def get(url, retries=5):
+    tries = 0
+    while tries < retries:
+        try:
+            return requests.get(url)
+        except Exception as e:
+            tries += 1
+            time.sleep(1)
 
 
 def fetch_resolution_urls_for_day(date):
@@ -29,7 +42,7 @@ def fetch_resolution_urls_for_day(date):
         '&ExpandView&Count=30000'
     )
 
-    response = requests.get(url)
+    response = get(url)
     root = html.fromstring(response.content)
 
     relative_urls = root.xpath("//font[@size='2' and @face='Arial']/a/@href")
@@ -37,9 +50,12 @@ def fetch_resolution_urls_for_day(date):
 
     return urls
 
+def clean(text):
+    return " ".join(text.split()).strip()
 
-def fetch_resolution(url):
-    response = requests.get(url)
+
+def fetch_resolution(url, date, save_html=True):
+    response = get(url)
     root = html.fromstring(response.content)
 
     selectors = {
@@ -60,14 +76,17 @@ def fetch_resolution(url):
         'file_id': "".join(root.xpath(selectors['file_id'])),
         'approval_date': "".join(root.xpath(selectors['approval_date'])),
 
-        'category': "".join(root.xpath(selectors['category'])),
-        'subcategory': "".join(root.xpath(selectors['subcategory'])),
-        'summary': "".join(root.xpath(selectors['summary'])),
+        'category': clean("".join(root.xpath(selectors['category']))),
+        'subcategory': clean("".join(root.xpath(selectors['subcategory']))),
+        'summary': clean("".join(root.xpath(selectors['summary']))),
 
-        'content': "".join(root.xpath(selectors['content'])),
-        'html': etree.tostring(root, encoding='unicode'),
+        'content': clean("".join(root.xpath(selectors['content']))),
         'url': url,
+        'date': date,
     }
+
+    if save_html:
+        resolution['html'] = etree.tostring(root, encoding='unicode'),
 
     authors = []
     author_nodes = root.xpath(selectors['authors'])
@@ -86,35 +105,50 @@ def fetch_resolution(url):
     return resolution
 
 
-def fetch_resolutions_for_day(date):
+def fetch_resolutions_for_day(date, save_html=False):
     urls = fetch_resolution_urls_for_day(date)
-    return [fetch_resolution(url) for url in urls]
+    return [fetch_resolution(url, date, save_html=save_html) for url in urls]
+
+
+def write_to_file(resolutions, folder):
+    date = resolutions[0]['date']
+    filename = os.path.join(folder, date + '.jsonl')
+    dirname = os.path.dirname(filename)
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
+
+    if not os.path.exists(filename):
+        with open(filename, 'w'):
+            pass
+
+    resolutions.sort(key=lambda x: x['resolution_number'])
+
+    with open(filename, 'a') as f:
+        for resolution in resolutions:
+            f.write(json.dumps(resolution, ensure_ascii=False, sort_keys=True) + '\n')
 
 
 @click.command()
-@click.argument('output')
+@click.argument('folder', default='resolutions/', type=str)
 @click.option('--concurrency', default=1, type=int)
 @click.option('--limit', default=None, type=int)
-def cli(output, concurrency, limit):
+@click.option('--no-html', is_flag=True)
+def cli(folder, concurrency, limit, no_html):
     dates = fetch_dates()
     echo(f'Found {len(dates)} dates to parse')
 
     if limit:
         dates = random.sample(dates, limit)
 
-    # Clear the output file.
-    with open(output, 'w') as f:
-        pass
+    fetch_resolutions_for_day_fn = functools.partial(fetch_resolutions_for_day, save_html=not no_html)
 
     count = 0
     with Pool(processes=concurrency) as pool:
         with progressbar(dates, label='Fetching dates') as bar:
-            fetcher = pool.imap_unordered(fetch_resolutions_for_day, dates)
+            fetcher = pool.imap_unordered(fetch_resolutions_for_day_fn, dates)
             for resolutions in fetcher:
-                with open(output, 'a') as f:
-                    for resolution in resolutions:
-                        count += 1
-                        f.write(json.dumps(resolution) + '\n')
+                write_to_file(resolutions, folder)
+                count += len(resolutions)
 
                 # `imap_unordered` consumes the bar before actually being
                 # ready, so we update manually.
