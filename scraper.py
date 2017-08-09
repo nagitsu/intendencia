@@ -13,16 +13,17 @@ from urllib.parse import urljoin
 
 
 BASE_URL = 'http://www.montevideo.gub.uy/asl/sistemas/Gestar/resoluci.nsf'
+HEADERS = {
+    'User-Agent': 'Chrome something something',
+    'Accept': '*/*',
+}
 
 
 def fetch_dates():
     url = f'{BASE_URL}/BetaWebFechaApAsc?OpenView&Start=1&Count=30000'
-
     response = get(url)
     root = html.fromstring(response.content)
-
     dates = root.xpath("//font[@size='2' and @face='Arial']/text()")
-
     return dates
 
 
@@ -30,8 +31,10 @@ def get(url, retries=5):
     tries = 0
     while tries < retries:
         try:
-            return requests.get(url)
+            response = requests.get(url, headers=HEADERS)
+            return response
         except Exception as e:
+            click.echo(f'{e}', err=True)
             tries += 1
             time.sleep(1)
 
@@ -49,6 +52,7 @@ def fetch_resolution_urls_for_day(date):
     urls = [urljoin(BASE_URL, url) for url in relative_urls]
 
     return urls
+
 
 def clean(text):
     return " ".join(text.split()).strip()
@@ -125,7 +129,8 @@ def write_to_file(resolutions, folder):
 
     with open(filename, 'a') as f:
         for resolution in resolutions:
-            f.write(json.dumps(resolution, ensure_ascii=False, sort_keys=True) + '\n')
+            f.write(json.dumps(
+                resolution, ensure_ascii=False, sort_keys=True) + '\n')
 
 
 @click.command()
@@ -140,7 +145,9 @@ def cli(folder, concurrency, limit, no_html):
     if limit:
         dates = random.sample(dates, limit)
 
-    fetch_resolutions_for_day_fn = functools.partial(fetch_resolutions_for_day, save_html=not no_html)
+    fetch_resolutions_for_day_fn = functools.partial(
+        fetch_resolutions_for_day, save_html=not no_html
+    )
 
     count = 0
     with Pool(processes=concurrency) as pool:
